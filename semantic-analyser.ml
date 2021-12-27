@@ -128,12 +128,100 @@ module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
         | Some(major, minor) -> VarBound(name, major, minor))
     | Some minor -> VarParam(name, minor);;
 
+
+    (* Helping stuff  ********************************************************************)
+
+    exception X_invalid_expr;;
+    exception Var_Not_Here_Param;;
+    exception Var_Not_Here_Bound;;
+    
+    let safe_find pred lst = 
+      try Some(List.find pred lst)
+      with Not_found -> None;;
+    
+    let rec range i j = if i > j then [] else i :: (range (i+1) j);;
+
+    let rec search_lst line_env vr n = 
+      match line_env with
+        | v::rest -> (if v=vr then n else search_lst rest vr (n+1))
+        | [] -> raise Var_Not_Here_Param;;
+    
+    let rec search_bound env vr minor = match env with
+    | env::rest -> (try(let major = (search_lst env vr 0) in (minor, major)) 
+            with Var_Not_Here_Param -> search_bound rest vr (minor+1))
+    | [] -> raise Var_Not_Here_Bound;;
+
+    let check_vars env vr = match env with
+    | [] -> VarFree(vr)
+    | env::rest -> try VarParam(vr, search_lst env vr 0) 
+          with Var_Not_Here_Param -> (try(let (minor, major) = search_bound rest vr 0 
+              in VarBound(vr,minor, major))
+                with Var_Not_Here_Bound -> VarFree(vr));;
+
+    (* Var Lexical Address *)
+    let var_lexical_address params bound x = 
+      if (List.mem x params) then 
+          let lst = (List.combine params (range 0 ((List.length params) - 1 ))) in
+          let (a, b) = (List.find (fun (a,b)-> String.equal x a) lst) in
+          ScmVar'(VarParam(a,b)) 
+      else 
+        let ans = List.combine bound (range 0 ((List.length bound) - 1)) in 
+        let ans = safe_find(fun (my_list, layer)-> List.mem x my_list) ans in
+        match ans with 
+      |Some(my_list, layer) ->  let lst = (List.combine my_list (range 0 ((List.length my_list) - 1 ))) in
+                                  let (my_var, index) = (List.find (fun (a,b)-> String.equal x a) lst) in    
+                                  ScmVar'(VarBound(my_var, layer, index))
+      |None -> ScmVar'(VarFree (x));;
+      
+    (* Lexical Address *)   
+    let rec lexical_address params bound = function 
+      | ScmConst(x) -> ScmConst'(x)
+      | ScmIf(test,alt,elsee) -> ScmIf'((lexical_address params bound test) , (lexical_address params bound alt),( lexical_address params bound elsee))
+      | ScmSeq (lst) -> ScmSeq' (List.map (lexical_address params bound) lst) 
+      | ScmSet(ScmVar(expr1),expr2) -> ScmSet'((check_vars (params::bound) expr1), (lexical_address params bound expr2))
+      | ScmDef (ScmVar(x), value) -> ScmDef'((check_vars (params::bound) x),(lexical_address params bound value))
+      | ScmOr (lst) -> ScmOr' (List.map (lexical_address params bound) lst)
+      | ScmLambdaSimple(vars,body) -> ScmLambdaSimple' (vars, (lexical_address vars (params::bound) body))
+      | ScmLambdaOpt(vars,variadic,body) -> let param_list =  (List.rev (variadic::(List.rev vars))) in
+      ScmLambdaOpt'(vars,variadic, (lexical_address param_list (params::bound) body)) 
+      | ScmApplic(rator, rands) -> ScmApplic'((lexical_address params bound rator), (List.map (lexical_address params bound) rands))
+      | ScmVar(x)-> (var_lexical_address params bound x) 
+      | _ -> raise X_this_should_not_happen;;
+
+      (* Tails *)
+      let rec tail_calls tp e = match e with 
+      | ScmConst'(x) -> e
+      | ScmVar'(x) -> e
+      | ScmBox'(x) -> e
+      | ScmBoxGet'(x) -> e
+      | ScmBoxSet'(x,y) -> e
+      | ScmIf'(test,alt,elsee) -> ScmIf' ((tail_calls false test) , (tail_calls tp alt) , (tail_calls tp elsee))
+      | ScmDef'(var,value) -> ScmDef' (var , (tail_calls  tp value))
+      | ScmOr'(lst) -> let last = (List.hd(List.rev lst)) in
+                    let first = (List.rev(List.tl(List.rev lst))) in
+                    ScmOr' ((List.map (tail_calls false) first) @ [(tail_calls tp last)])
+      | ScmSeq'(lst) -> let last = (List.hd(List.rev lst)) in
+                     let first = (List.rev(List.tl(List.rev lst))) in
+                     ScmSeq' ((List.map (tail_calls false) first) @ [(tail_calls tp last)])
+      | ScmSet'(var,value) -> ScmSet' (var, (tail_calls false value))
+      | ScmLambdaSimple'(vars,body) -> ScmLambdaSimple'(vars, (tail_calls true body))
+      | ScmLambdaOpt'(vars,variadic,body) -> ScmLambdaOpt'(vars,variadic,(tail_calls true body))
+      | ScmApplic'(rand,rator) -> begin match tp with
+                                | true -> ScmApplicTP'((tail_calls false rand), (List.map (tail_calls false) rator))
+                                | false -> ScmApplic' ((tail_calls false rand), (List.map (tail_calls false) rator)) end
+      | ScmApplicTP'(rand,rator) -> raise X_invalid_expr;;
+
+      (* Box *)
+      
   (* run this first! *)
   let annotate_lexical_addresses pe = 
-   let rec run pe params env =
+    (lexical_address [] [[]] pe);;
+
+    
+   (* let rec run pe params env =
       raise X_not_yet_implemented 
    in 
-   run pe [] [];;
+   run pe [] [];; *)
 
   let rec rdc_rac s =
     match s with
@@ -144,11 +232,12 @@ module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
     | _ -> raise X_this_should_not_happen;;
   
   (* run this second! *)
-  let annotate_tail_calls pe =
+  let annotate_tail_calls e = (tail_calls false e);;
+  (* let annotate_tail_calls pe =
    let rec run pe in_tail =
       raise X_not_yet_implemented 
    in 
-   run pe false;;
+   run pe false;; *)
 
   (* boxing *)
 
